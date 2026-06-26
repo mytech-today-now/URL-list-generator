@@ -9,6 +9,9 @@
 
 .NOTES
     This module has no dependencies and contains pure functions for testability.
+    The original parsing error was caused by incorrect regex string escaping in
+    PowerShell single-quoted strings. This version uses proper escaping and
+    verbatim (here-string) patterns where appropriate.
 #>
 
 Set-StrictMode -Version Latest
@@ -22,7 +25,6 @@ function Get-Regex {
     .SYNOPSIS
         Get or create a pre-compiled Regex instance with caching
     #>
-    [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position=0)]
         [string]$Pattern,
@@ -107,7 +109,7 @@ href
 <meta
 \s+ [^>]*?
 http-equiv \s* = \s* ["\'] refresh ["\'] [^>]*?
-content \s* = \s* ["\'] \d+ \s* ; \s* url = ([^"']+) ["\']
+content \s* = \s* ["\'] \d+ \s* ; \s* url = ([^"\']+) ["\']
 '@
 
     # JavaScript URL patterns (to filter or flag)
@@ -225,7 +227,7 @@ function Extract-UrlsFromHtml {
     )
 
     begin {
-        $results = [System.Collections.Generic.List[pscustomobject]]::new()
+        $results = @()
         $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $baseUri = if ($BaseUrl) { try { [Uri]::new($BaseUrl) } catch { $null } } else { $null }
     }
@@ -267,13 +269,13 @@ function Extract-UrlsFromHtml {
                 if ($Unique -and $seen.Contains($normalized)) { continue }
                 $seen.Add($normalized) | Out-Null
 
-                $results.Add([pscustomobject]@{
+                $results += [pscustomobject]@{
                     Url          = $normalized
                     Attribute    = $attr
                     OriginalUrl  = $url
                     IsRelative   = (Test-RelativeUrl $url)
                     SourceHtml   = $match.Value.Substring(0, [Math]::Min(200, $match.Value.Length))
-                })
+                }
             }
         }
     }
@@ -477,7 +479,7 @@ function Test-UrlValid {
         [string[]]$AllowedSchemes = @('http', 'https')
     )
 
-    $result = @{
+    $result = [UrlValidationResult]@{
         Url              = $Url
         IsValid          = $false
         Errors           = @()
@@ -516,7 +518,7 @@ function Test-UrlValid {
     if ($uri.Host -notmatch '^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$' -and
         $uri.Host -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -and
         $uri.Host -ne 'localhost') {
-        $result.Errors += "Host '$($uri.Host)' does not appear to be a valid domain or IP"
+        $result.Errors += "Host '$(uri.Host)' does not appear to be a valid domain or IP"
         # Don't return - just warn
     }
 
@@ -536,15 +538,13 @@ function Check-UrlReachability {
     param(
         [string]$Url,
         [int]$TimeoutSec,
-        $Result
+        [UrlValidationResult]$Result
     )
 
     try {
         $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Method = 'HEAD'
         $request.Timeout = $TimeoutSec * 1000
-        $
-```powershell
         $request.UserAgent = $script:ModuleConfig.DefaultUserAgent
         $request.AllowAutoRedirect = $true
         $request.MaximumAutomaticRedirections = 5
@@ -614,8 +614,8 @@ function ConvertTo-AbsoluteUrl {
         string (absolute URL)
 
     .EXAMPLE
-        ConvertTo-AbsoluteUrl '/path/page.html' '<https://example.com/base/>'
-        # Returns: '<https://example.com/path/page.html>'
+        ConvertTo-AbsoluteUrl '/path/page.html' 'https://example.com/base/'
+        # Returns: 'https://example.com/path/page.html'
     #>
     [CmdletBinding()]
     param(
@@ -665,7 +665,7 @@ function Select-UrlPattern {
         Invert match (exclude matching URLs)
 
     .EXAMPLE
-        Get-UrlList -Source '<https://example.com>' | Select-UrlPattern -Pattern '*blog*' -NotMatch
+        Get-UrlList -Source 'https://example.com' | Select-UrlPattern -Pattern '*blog*' -NotMatch
 
     .EXAMPLE
         $urls | Select-UrlPattern -Pattern '^/api/v\d+' -Regex
@@ -692,7 +692,7 @@ function Select-UrlPattern {
             }
             else {
                 # Wildcard to regex conversion
-                $regexPattern = '^' + ([System.Text.RegularExpressions.Regex]::Escape($Pattern) -replace '\\\\\\\\*', '.*' -replace '\\\\\\\\?', '.') + '$'
+                $regexPattern = '^' + ([System.Text.RegularExpressions.Regex]::Escape($Pattern) -replace '\\\\*', '.*' -replace '\\\\?', '.') + '$'
                 if ($CaseSensitive) { $u -cmatch $regexPattern } else { $u -imatch $regexPattern }
             }
 
@@ -704,12 +704,45 @@ function Select-UrlPattern {
 
 #endregion
 
-#region Type Definitions (for output objects - pure PSObject, no Add-Type for compatibility)
+#region Type Definitions (for output objects)
 
-# Type data for consistent property access
+# Disable Add-Type in constrained environments, use PSObject fallback
+# This avoids compilation errors in some PowerShell environments
+$useAddType = $false
+
+if ($useAddType) {
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+
+public class UrlInfo {
+    public string Url { get; set; }
+    public string Attribute { get; set; }
+    public string OriginalUrl { get; set; }
+    public bool IsRelative { get; set; }
+    public string SourceHtml { get; set; }
+    public DateTime ExtractedAt { get; set; } = DateTime.UtcNow;
+}
+
+public class UrlValidationResult {
+    public string Url { get; set; }
+    public bool IsValid { get; set; }
+    public List<string> Errors { get; set; } = new List<string>();
+    public int? HttpStatusCode { get; set; }
+    public string NormalizedUrl { get; set; }
+}
+'@ -Language CSharp -ReferencedAssemblies 'System.dll', 'System.Core.dll' -ErrorAction Stop
+    }
+    catch {
+        Log-Warning -Message "Add-Type failed, using PSObject fallback" -Category 'Types'
+        $useAddType = $false
+    }
+}
+
 if (-not ('UrlInfo' -as [Type])) {
-    Update-TypeData -TypeName 'UrlInfo' -MemberType ScriptProperty -MemberName Url -Value { $this.Url } -ErrorAction SilentlyContinue
-    Update-TypeData -TypeName 'UrlValidationResult' -MemberType ScriptProperty -MemberName Url -Value { $this.Url } -ErrorAction SilentlyContinue
+    Update-TypeData -TypeName 'UrlInfo' -MemberType ScriptProperty -MemberName Url -Value { $this.Url }
+    Update-TypeData -TypeName 'UrlValidationResult' -MemberType ScriptProperty -MemberName Url -Value { $this.Url }
 }
 
 #endregion

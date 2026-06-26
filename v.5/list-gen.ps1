@@ -215,10 +215,7 @@ if ($Url) {
         Write-Error "Input file not found: $InputFile"
         exit 1
     }
-} elseif ([Console]::IsInputRedirected) {
-    # Pipeline input
-    $allUrls = @($input) | Where-Object { $_ }
-} else {
+} elseif ($input -and -not [Console]::IsInputRedirected) {
     # Interactive mode
     Write-Host "`nEnter web directory URL(s) (one per line, blank line to finish):" -ForegroundColor Yellow
     $inputLines = @()
@@ -228,6 +225,9 @@ if ($Url) {
         $inputLines += $line
     }
     $allUrls = $inputLines
+} else {
+    # Try pipeline input
+    $allUrls = @($input) | Where-Object { $_ }
 }
 
 # Clean and parse URLs

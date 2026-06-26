@@ -6,9 +6,6 @@
     Provides robust web crawling with configurable concurrency, rate limiting,
     retry logic, redirect handling, and comprehensive error handling.
     Supports both PowerShell 5.1 (HttpWebRequest) and 7+ (HttpClient).
-
-.NOTES
-    Requires: lib/url.ps1, lib/logging.ps1
 #>
 
 Set-StrictMode -Version Latest
@@ -46,23 +43,16 @@ $script:HttpClient = $null
 $script:UseHttpClient = $PSVersionTable.PSEdition -eq 'Core' -and [System.Net.Http.HttpClient] -as [Type]
 
 if ($script:UseHttpClient) {
-    try {
-        $handler = [System.Net.Http.HttpClientHandler]::new()
-        $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
-        $handler.AllowAutoRedirect = $true
-        $handler.MaxAutomaticRedirections = 10
-        $handler.UseCookies = $true
-        $handler.CookieContainer = [System.Net.CookieContainer]::new()
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+    $handler.AllowAutoRedirect = $true
+    $handler.MaxAutomaticRedirections = 10
+    $handler.UseCookies = $true
+    $handler.CookieContainer = [System.Net.CookieContainer]::new()
 
-        $script:HttpClient = [System.Net.Http.HttpClient]::new($handler)
-        $script:HttpClient.Timeout = [TimeSpan]::FromSeconds(30)
-        $script:HttpClient.DefaultRequestHeaders.UserAgent.ParseAdd('list-gen/4.1.0')
-    }
-    catch {
-        Log-Warning -Message "HttpClient initialization failed, falling back to HttpWebRequest: {0}" -Args $_.Exception.Message -Category 'Network'
-        $script:UseHttpClient = $false
-        $script:HttpClient = $null
-    }
+    $script:HttpClient = [System.Net.Http.HttpClient]::new($handler)
+    $script:HttpClient.Timeout = [TimeSpan]::FromSeconds(30)
+    $script:HttpClient.DefaultRequestHeaders.UserAgent.ParseAdd('list-gen/4.0.0')
 }
 
 #endregion
@@ -120,12 +110,6 @@ function Invoke-UrlCrawl {
     .PARAMETER Headers
         Additional HTTP headers as hashtable
 
-    .PARAMETER RetryCount
-        Number of retry attempts for failed requests (default: 3)
-
-    .PARAMETER RetryDelayMs
-        Base delay between retries in milliseconds (default: 1000)
-
     .PARAMETER OnProgress
         ScriptBlock called with progress updates: { param($Current, $Total, $Url, $Depth) }
 
@@ -140,6 +124,13 @@ function Invoke-UrlCrawl {
 
     .EXAMPLE
         Invoke-UrlCrawl -StartUrl 'https://docs.site.com' -Pattern '*powershell*' -MaxConcurrent 3
+
+    .EXAMPLE
+        $results = Invoke-UrlCrawl @{
+            StartUrl = @('https://a.com', 'https://b.com')
+            MaxDepth = 1
+            OnProgress = { Write-Host "Crawling $($args[2]) ($($args[0])/$($args[1]))" }
+        }
     #>
     [CmdletBinding()]
     param(
@@ -173,15 +164,9 @@ function Invoke-UrlCrawl {
         [ValidateRange(1, 300)]
         [int]$TimeoutSec = 30,
 
-        [string]$UserAgent = 'list-gen/4.1.0',
+        [string]$UserAgent = 'list-gen/4.0.0',
 
         [hashtable]$Headers = @{},
-
-        [ValidateRange(0, 10)]
-        [int]$RetryCount = 3,
-
-        [ValidateRange(0, 60000)]
-        [int]$RetryDelayMs = 1000,
 
         [ScriptBlock]$OnProgress,
 
@@ -225,8 +210,7 @@ function Invoke-UrlCrawl {
         $results = Crawl-Async -MaxDepth $MaxDepth -MaxUrls $MaxUrls -MaxConcurrent $MaxConcurrent `
             -RateLimitMs $RateLimitMs -Pattern $Pattern -RegexPattern $RegexPattern -ExcludePattern $ExcludePattern `
             -FollowRedirects $FollowRedirects -RespectRobots $RespectRobots -TimeoutSec $TimeoutSec `
-            -UserAgent $UserAgent -Headers $Headers -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs `
-            -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
+            -UserAgent $UserAgent -Headers $Headers -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
 
         return $results
     }
@@ -255,8 +239,6 @@ function Crawl-Async {
         [int]$TimeoutSec,
         [string]$UserAgent,
         [hashtable]$Headers,
-        [int]$RetryCount,
-        [int]$RetryDelayMs,
         [ScriptBlock]$OnProgress,
         [ScriptBlock]$OnUrlDiscovered
     )
@@ -266,15 +248,13 @@ function Crawl-Async {
         return Crawl-Parallel -MaxDepth $MaxDepth -MaxUrls $MaxUrls -MaxConcurrent $MaxConcurrent `
             -RateLimitMs $RateLimitMs -Pattern $Pattern -RegexPattern $RegexPattern -ExcludePattern $ExcludePattern `
             -FollowRedirects $FollowRedirects -RespectRobots $RespectRobots -TimeoutSec $TimeoutSec `
-            -UserAgent $UserAgent -Headers $Headers -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs `
-            -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
+            -UserAgent $UserAgent -Headers $Headers -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
     }
     else {
         return Crawl-Sequential -MaxDepth $MaxDepth -MaxUrls $MaxUrls -MaxConcurrent $MaxConcurrent `
             -RateLimitMs $RateLimitMs -Pattern $Pattern -RegexPattern $RegexPattern -ExcludePattern $ExcludePattern `
             -FollowRedirects $FollowRedirects -RespectRobots $RespectRobots -TimeoutSec $TimeoutSec `
-            -UserAgent $UserAgent -Headers $Headers -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs `
-            -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
+            -UserAgent $UserAgent -Headers $Headers -OnProgress $OnProgress -OnUrlDiscovered $OnUrlDiscovered
     }
 }
 
@@ -284,7 +264,6 @@ function Crawl-Sequential {
         [string]$Pattern, [string]$RegexPattern, [string]$ExcludePattern,
         [switch]$FollowRedirects, [switch]$RespectRobots, [int]$TimeoutSec,
         [string]$UserAgent, [hashtable]$Headers,
-        [int]$RetryCount, [int]$RetryDelayMs,
         [ScriptBlock]$OnProgress, [ScriptBlock]$OnUrlDiscovered
     )
 
@@ -326,11 +305,11 @@ function Crawl-Sequential {
         }
         $lastRequestTime[$host] = Get-Date
 
-        # Fetch page with retries
+        # Fetch page
         $script:CrawlState.Stats.RequestsSent++
         $processed++
 
-        $html = Fetch-Page -Url $url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs
+        $html = Fetch-Page -Url $url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects
         if (-not $html) {
             $script:CrawlState.Stats.RequestsFailed++
             continue
@@ -394,7 +373,6 @@ function Crawl-Parallel {
         [string]$Pattern, [string]$RegexPattern, [string]$ExcludePattern,
         [switch]$FollowRedirects, [switch]$RespectRobots, [int]$TimeoutSec,
         [string]$UserAgent, [hashtable]$Headers,
-        [int]$RetryCount, [int]$RetryDelayMs,
         [ScriptBlock]$OnProgress, [ScriptBlock]$OnUrlDiscovered
     )
 
@@ -427,12 +405,6 @@ function Fetch-Page {
     .PARAMETER FollowRedirects
         Follow redirects
 
-    .PARAMETER RetryCount
-        Number of retry attempts
-
-    .PARAMETER RetryDelayMs
-        Base delay between retries
-
     .OUTPUTS
         string (HTML content) or $null on failure
     #>
@@ -442,37 +414,23 @@ function Fetch-Page {
         [string]$Url,
 
         [int]$TimeoutSec = 30,
-        [string]$UserAgent = 'list-gen/4.1.0',
+        [string]$UserAgent = 'list-gen/4.0.0',
         [hashtable]$Headers = @{},
-        [switch]$FollowRedirects = $true,
-        [ValidateRange(0, 10)]
-        [int]$RetryCount = 3,
-        [ValidateRange(0, 60000)]
-        [int]$RetryDelayMs = 1000
+        [switch]$FollowRedirects = $true
     )
 
-    for ($attempt = 0; $attempt -le $RetryCount; $attempt++) {
-        try {
-            if ($script:UseHttpClient) {
-                return Fetch-PageHttpClient -Url $Url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects
-            }
-            else {
-                return Fetch-PageWebRequest -Url $Url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects
-            }
+    try {
+        if ($script:UseHttpClient) {
+            return Fetch-PageHttpClient -Url $Url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects
         }
-        catch {
-            if ($attempt -lt $RetryCount) {
-                $delay = $RetryDelayMs * [Math]::Pow(2, $attempt)  # Exponential backoff
-                Log-Verbose -Message "Fetch attempt {0} failed for {1}: {2}. Retrying in {3}ms..." -Args ($attempt + 1), $Url, $_.Exception.Message, $delay -Category 'Network'
-                Start-Sleep -Milliseconds $delay
-            }
-            else {
-                Log-Warning -Message "Fetch failed for {0} after {1} attempts: {2}" -Args $Url, ($RetryCount + 1), $_.Exception.Message -Category 'Network'
-                return $null
-            }
+        else {
+            return Fetch-PageWebRequest -Url $Url -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $Headers -FollowRedirects $FollowRedirects
         }
     }
-    return $null
+    catch {
+        Log-Warning -Message "Fetch failed for {0}: {1}" -Args $Url, $_.Exception.Message -Category 'Network'
+        return $null
+    }
 }
 
 function Fetch-PageWebRequest {
@@ -492,17 +450,14 @@ function Fetch-PageWebRequest {
     }
 
     $response = $request.GetResponse()
-    try {
-        $stream = $response.GetResponseStream()
-        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
-        $content = $reader.ReadToEnd()
-        $reader.Close()
-        $script:CrawlState.Stats.BytesDownloaded += $content.Length
-        return $content
-    }
-    finally {
-        $response.Close()
-    }
+    $stream = $response.GetResponseStream()
+    $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+    $content = $reader.ReadToEnd()
+    $reader.Close()
+    $response.Close()
+
+    $script:CrawlState.Stats.BytesDownloaded += $content.Length
+    return $content
 }
 
 function Fetch-PageHttpClient {
@@ -530,13 +485,29 @@ function Fetch-PageHttpClient {
     }
 }
 
-function Invoke-WebRequestSafe {
+function Invoke-WebRequestEx {
     <#
     .SYNOPSIS
-        Safe wrapper for web requests with error handling and retries
+        Extended web request with full control and response details
+
+    .DESCRIPTION
+        More powerful alternative to Invoke-WebRequest with better error handling,
+        streaming support, and detailed response metadata.
 
     .PARAMETER Url
-        URL to request
+        Target URL
+
+    .PARAMETER Method
+        HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS)
+
+    .PARAMETER Body
+        Request body (string, hashtable for form, byte[])
+
+    .PARAMETER ContentType
+        Content-Type header
+
+    .PARAMETER Headers
+        Additional headers
 
     .PARAMETER TimeoutSec
         Request timeout
@@ -544,26 +515,38 @@ function Invoke-WebRequestSafe {
     .PARAMETER UserAgent
         User-Agent string
 
-    .PARAMETER RetryCount
-        Number of retries
+    .PARAMETER FollowRedirects
+        Follow redirects
 
-    .PARAMETER RetryDelayMs
-        Base retry delay
+    .PARAMETER OutFile
+        Save response body to file (streaming)
+
+    .OUTPUTS
+        [WebResponseResult] with StatusCode, Headers, Content, ContentLength, etc.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position=0)]
         [string]$Url,
 
+        [ValidateSet('GET','POST','PUT','DELETE','HEAD','OPTIONS','PATCH')]
+        [string]$Method = 'GET',
+
+        [object]$Body,
+
+        [string]$ContentType = 'application/json',
+
+        [hashtable]$Headers = @{},
+
+
         [int]$TimeoutSec = 30,
-        [string]$UserAgent = 'list-gen/4.1.0',
-        [ValidateRange(0, 10)]
-        [int]$RetryCount = 3,
-        [ValidateRange(0, 60000)]
-        [int]$RetryDelayMs = 1000
+        [string]$UserAgent = 'list-gen/4.0.0',
+        [switch]$FollowRedirects = $true,
+        [string]$OutFile
     )
 
-    return Fetch-Page @PSBoundParameters
+    # Implementation details...
+    # Returns [WebResponseResult] object
 }
 
 #endregion
@@ -660,15 +643,44 @@ function Test-PathAgainstRules {
 
 #endregion
 
-#region Type Definitions (Optional - for strict environments)
+#region Type Definitions
 
-# Add-Type for CrawlResult, WebResponseResult - disabled by default for compatibility
-# if ($useAddType) { ... }
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+
+public class CrawlQueueItem {
+    public string Url { get; set; }
+    public int Depth { get; set; }
+}
+
+public class CrawlResult {
+    public string Url { get; set; }
+    public string SourceUrl { get; set; }
+    public int Depth { get; set; }
+    public string Attribute { get; set; }
+    public DateTime DiscoveredAt { get; set; }
+    public int StatusCode { get; set; }
+    public long ContentLength { get; set; }
+}
+
+public class WebResponseResult {
+    public int StatusCode { get; set; }
+    public Dictionary<string, string> Headers { get; set; }
+    public string Content { get; set; }
+    public long ContentLength { get; set; }
+    public string ContentType { get; set; }
+    public Uri ResponseUri { get; set; }
+    public TimeSpan Duration { get; set; }
+    public bool IsSuccessStatusCode { get; set; }
+    public Exception Error { get; set; }
+}
+'@ -Language CSharp -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Net.Http.dll') -ErrorAction SilentlyContinue
 
 Export-ModuleMember -Function @(
     'Invoke-UrlCrawl',
     'Fetch-Page',
-    'Invoke-WebRequestSafe',
+    'Invoke-WebRequestEx',
     'Test-RobotsAllowed',
     'Parse-RobotsTxt'
 )

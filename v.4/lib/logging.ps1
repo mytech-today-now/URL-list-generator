@@ -22,7 +22,6 @@ $script:LogConfig = @{
     MaxFileSizeMB   = 10
     MaxFiles        = 5
     IncludeContext  = $true
-    Encoding        = [System.Text.UTF8Encoding]::new($false)  # UTF8NoBOM
 }
 
 $script:LogLevels = @{
@@ -39,7 +38,7 @@ $script:ConsoleColors = @{
     'Verbose'  = 'Cyan'
     'Info'     = 'Green'
     'Warning'  = 'Yellow'
-    'Error'    = 'Red'
+    'Error'     = 'Red'
     'Critical' = 'Magenta'
 }
 
@@ -229,8 +228,7 @@ function Initialize-LogFile {
     $path = $script:LogConfig.FilePath
     $dir = Split-Path $path -Parent
     if (-not (Test-Path $dir)) {
-        try { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-        catch { throw "Cannot create log directory '$dir': $($_.Exception.Message)" }
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
     }
 
     # Rotate if needed
@@ -241,15 +239,8 @@ function Initialize-LogFile {
         }
     }
 
-    try {
-        $script:FileStream = [System.IO.StreamWriter]::new($path, $true, $script:LogConfig.Encoding)
-        $script:FileStream.AutoFlush = $true
-    }
-    catch {
-        Log-Warning -Message "Failed to open log file '$path': {0}" -Args $_.Exception.Message -Category 'Logging'
-        $script:LogConfig.EnableFile = $false
-        $script:FileStream = $null
-    }
+    $script:FileStream = [System.IO.StreamWriter]::new($path, $true, $script:ModuleConfig.Encoding)
+    $script:FileStream.AutoFlush = $true
 }
 
 function Rotate-LogFiles {
@@ -258,7 +249,8 @@ function Rotate-LogFiles {
 
     # Close current stream
     if ($script:FileStream) {
-        try { $script:FileStream.Close(); $script:FileStream.Dispose() } catch { }
+        $script:FileStream.Close()
+        $script:FileStream.Dispose()
         $script:FileStream = $null
     }
 
@@ -267,8 +259,7 @@ function Rotate-LogFiles {
         $src = if ($i -eq 1) { $basePath } else { "$basePath.$i" }
         $dst = "$basePath.$($i + 1)"
         if (Test-Path $src) {
-            try { Move-Item -Path $src -Destination $dst -Force }
-            catch { Log-Warning -Message "Failed to rotate log file '$src': {0}" -Args $_.Exception.Message -Category 'Logging' }
+            Move-Item -Path $src -Destination $dst -Force
         }
     }
 }
@@ -313,8 +304,6 @@ function Write-LogToFile {
         Initialize-LogFile
     }
 
-    if (-not $script:FileStream) { return }
-
     try {
         $json = $Entry | ConvertTo-Json -Depth 5 -Compress
         $script:FileStream.WriteLine($json)
@@ -322,7 +311,7 @@ function Write-LogToFile {
     catch {
         # Fallback: write as plain text to avoid losing logs
         $fallback = "[$($Entry.Timestamp)] [$($Entry.Level)] [$($Entry.Category)] $($Entry.Message)"
-        try { $script:FileStream.WriteLine($fallback) } catch { }
+        $script:FileStream.WriteLine($fallback)
     }
 }
 

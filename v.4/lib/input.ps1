@@ -5,9 +5,6 @@
 .DESCRIPTION
     Handles multiple input sources: single URLs, URL lists from files (txt, csv, json, xml),
     sitemaps, robots.txt, stdin pipeline, and clipboard. Provides validation and normalization.
-
-.NOTES
-    Requires: lib/url.ps1, lib/logging.ps1, lib/network.ps1
 #>
 
 Set-StrictMode -Version Latest
@@ -50,13 +47,13 @@ function Get-UrlInput {
         [UrlInputResult[]] with properties: Url, Source, LineNumber, IsValid, Errors
 
     .EXAMPLE
-        Get-UrlInput -Source '<https://example.com>'
+        Get-UrlInput -Source 'https://example.com'
 
     .EXAMPLE
         Get-UrlInput -Source './urls.txt' -Format Text
 
     .EXAMPLE
-        Get-UrlInput -Source 'sitemap:<https://example.com/sitemap.xml>'
+        Get-UrlInput -Source 'sitemap:https://example.com/sitemap.xml'
 
     .EXAMPLE
         Get-Content urls.csv | Get-UrlInput -Source 'stdin' -Format Csv -Column 'url'
@@ -110,7 +107,7 @@ function Get-UrlInput {
                 $results += Get-FileUrls -Path $Source -Format $Format -Column $Column -BaseUrl $BaseUrl -MaxUrls $MaxUrls -Validate:$Validate
             }
             elseif ($Source -match '^https?://') {
-                $results += @{
+                $results += [UrlInputResult]@{
                     Url         = $Source
                     Source      = 'Direct'
                     LineNumber  = 0
@@ -223,7 +220,7 @@ function Get-FileUrls {
             $errors = $validation.Errors
         }
 
-        $results += @{
+        $results += [UrlInputResult]@{
             Url         = $resolvedUrl
             Source      = "File:$detectedFormat"
             LineNumber  = $lineNum
@@ -260,7 +257,7 @@ function Get-CsvFileUrls {
     param([string]$Path, [string]$Column, [int]$MaxUrls)
 
     $data = Import-Csv -Path $Path -ErrorAction Stop
-    $colName = Find-ColumnName $data.PSObject.Properties.Name $Column
+    $colName = Find-ColumnName $data[0].PSObject.Properties.Name $Column
 
     $count = 0
     foreach ($row in $data) {
@@ -291,8 +288,8 @@ function Get-JsonFileUrls {
         $items = @($data)
     }
 
-    $colName = if ($items.Count -gt 0 -and $items -is [PSCustomObject]) {
-        Find-ColumnName $items.PSObject.Properties.Name $Column
+    $colName = if ($items.Count -gt 0 -and $items[0] -is [PSCustomObject]) {
+        Find-ColumnName $items[0].PSObject.Properties.Name $Column
     } else { $null }
 
     $count = 0
@@ -331,17 +328,17 @@ function Find-ColumnName {
 
     # Try exact match (case-insensitive)
     $match = $Properties | Where-Object { $_ -ieq $Preferred }
-    if ($match) { return $match }
+    if ($match) { return $match[0] }
 
     # Try common variations
     $variations = @('url','URL','Url','link','Link','href','Href','address','Address','uri','URI','Uri')
     foreach ($v in $variations) {
         $match = $Properties | Where-Object { $_ -ieq $v }
-        if ($match) { return $match }
+        if ($match) { return $match[0] }
     }
 
     # Default to first property
-    return $Properties
+    return $Properties[0]
 }
 
 #endregion
@@ -387,10 +384,65 @@ function Get-SitemapUrls {
 
     $results = @()
     $processedSitemaps = @()
+
+    $scriptBlock = {
+        param($XmlContent, $BaseUrl, $MaxUrls, $Validate, $FollowIndex, $ProcessedSitemaps, $Results)
+
+        $xml = [Xml]$XmlContent
+        $ns = @{ 'sm' = 'http://www.sitemaps.org/schemas/sitemap/0.9' }
+
+        # Check if it's a sitemap index
+        $sitemapNodes = $xml.SelectNodes('//sm:sitemap/sm:loc', $ns)
+        if (-not $sitemapNodes) { $sitemapNodes = $xml.SelectNodes('//sitemap/loc') }
+
+        if ($sitemapNodes -and $sitemapNodes.Count -gt 0 -and $FollowIndex) {
+            foreach ($node in $sitemapNodes) {
+                $childUrl = $node.InnerText.Trim()
+                if ($ProcessedSitemaps -contains $childUrl) { continue }
+                $ProcessedSitemaps += $childUrl
+
+                $childContent = Invoke-WebRequestSafe -Url $childUrl -TimeoutSec 30
+                if ($childContent) {
+                    & $MyInvocation.MyCommand.ScriptBlock -XmlContent $childContent -BaseUrl $BaseUrl -MaxUrls $MaxUrls -Validate $Validate -FollowIndex $FollowIndex -ProcessedSitemaps $ProcessedSitemaps -Results $Results
+                }
+            }
+            return
+        }
+
+        # Regular sitemap - extract URLs
+        $urlNodes = $xml.SelectNodes('//sm:url/sm:loc', $ns)
+        if (-not $urlNodes) { $urlNodes = $xml.SelectNodes('//url/loc') }
+
+        foreach ($node in $urlNodes) {
+            $url = $node.InnerText.Trim()
+            if (-not $url) { continue }
+
+            $errors = @()
+            $isValid = $true
+            if ($Validate) {
+                $validation = Test-UrlValid $url
+                $isValid = $validation.IsValid
+                $errors = $validation.Errors
+            }
+
+            $Results += [UrlInputResult]@{
+                Url         = $url
+                Source      = 'Sitemap'
+                LineNumber  = 0
+                IsValid     = $isValid
+                Errors      = $errors
+                RetrievedAt = (Get-Date).ToUniversalTime()
+            }
+
+            if ($MaxUrls -gt 0 -and $Results.Count -ge $MaxUrls) { break }
+        }
+    }
+
+    # Use a recursive approach
     $queue = @($SitemapUrl)
 
     while ($queue.Count -gt 0 -and ($MaxUrls -eq 0 -or $results.Count -lt $MaxUrls)) {
-        $currentUrl = $queue
+        $currentUrl = $queue[0]
         $queue = $queue[1..($queue.Count-1)]
         if ($processedSitemaps -contains $currentUrl) { continue }
         $processedSitemaps += $currentUrl
@@ -399,7 +451,7 @@ function Get-SitemapUrls {
         if (-not $currentContent) { continue }
 
         $xml = [Xml]$currentContent
-        $ns = @{ 'sm' = '<http://www.sitemaps.org/schemas/sitemap/0.9>' }
+        $ns = @{ 'sm' = 'http://www.sitemaps.org/schemas/sitemap/0.9' }
 
         # Check for sitemap index
         $sitemapNodes = $xml.SelectNodes('//sm:sitemap/sm:loc', $ns)
@@ -431,7 +483,7 @@ function Get-SitemapUrls {
                 $errors = $validation.Errors
             }
 
-            $results += @{
+            $results += [UrlInputResult]@{
                 Url         = $url
                 Source      = 'Sitemap'
                 LineNumber  = 0
@@ -452,7 +504,7 @@ function Get-SitemapUrlsFromFile {
 
     $content = Get-Content -Path $Path -Raw
     $xml = [Xml]$content
-    $ns = @{ 'sm' = '<http://www.sitemaps.org/schemas/sitemap/0.9>' }
+    $ns = @{ 'sm' = 'http://www.sitemaps.org/schemas/sitemap/0.9' }
 
     $urlNodes = $xml.SelectNodes('//sm:url/sm:loc', $ns)
     if (-not $urlNodes) { $urlNodes = $xml.SelectNodes('//url/loc') }
@@ -511,19 +563,19 @@ function Get-RobotsTxtUrls {
         if (-not $line -or $line.StartsWith('#')) { continue }
 
         if ($line -match '^User-agent:\s*(.+)$') {
-            $currentUserAgent = $matches.Trim()
+            $currentUserAgent = $matches[1].Trim()
         }
         elseif ($line -match '^Sitemap:\s*(.+)$' -and $currentUserAgent -in @('*', '', 'Googlebot', 'Bingbot')) {
-            $sitemaps += $matches.Trim()
+            $sitemaps += $matches[1].Trim()
         }
         elseif ($line -match '^Crawl-delay:\s*(\d+(?:\.\d+)?)$' -and $currentUserAgent -in @('*', '', 'Googlebot', 'Bingbot')) {
-            $crawlDelay = [double]$matches
+            $crawlDelay = [double]$matches[1]
         }
         elseif ($line -match '^Disallow:\s*(.+)$') {
-            $disallow += $matches.Trim()
+            $disallow += $matches[1].Trim()
         }
         elseif ($line -match '^Allow:\s*(.+)$') {
-            $allow += $matches.Trim()
+            $allow += $matches[1].Trim()
         }
     }
 
@@ -557,7 +609,7 @@ function Get-ClipboardUrls {
     return $urls | ForEach-Object {
         $errors = @(); $isValid = $true
         if ($Validate) { $v = Test-UrlValid $_; $isValid = $v.IsValid; $errors = $v.Errors }
-        @{ Url = $_; Source = 'Clipboard'; LineNumber = 0; IsValid = $isValid; Errors = $errors; RetrievedAt = (Get-Date).ToUniversalTime() }
+        [UrlInputResult]@{ Url = $_; Source = 'Clipboard'; LineNumber = 0; IsValid = $isValid; Errors = $errors; RetrievedAt = (Get-Date).ToUniversalTime() }
     }
 }
 
@@ -580,7 +632,7 @@ function Get-StdinUrls {
         $errors = @(); $isValid = $true
         if ($Validate) { $v = Test-UrlValid $url; $isValid = $v.IsValid; $errors = $v.Errors }
 
-        @{ Url = $url; Source = 'Stdin'; LineNumber = ++$count; IsValid = $isValid; Errors = $errors; RetrievedAt = (Get-Date).ToUniversalTime() }
+        yield [UrlInputResult]@{ Url = $url; Source = 'Stdin'; LineNumber = ++$count; IsValid = $isValid; Errors = $errors; RetrievedAt = (Get-Date).ToUniversalTime() }
 
         if ($MaxUrls -gt 0 -and $count -ge $MaxUrls) { break }
     }
@@ -597,7 +649,7 @@ function Invoke-WebRequestSafe {
 
         [int]$TimeoutSec = 30,
 
-        [string]$UserAgent = 'list-gen/4.1.0'
+        [string]$UserAgent = 'list-gen/4.0.0'
     )
 
     try {
@@ -622,6 +674,39 @@ function Invoke-WebRequestSafe {
 }
 
 #endregion
+
+#region Type Definition
+
+# Disable Add-Type in constrained environments, use PSObject fallback
+$useAddType = $false
+
+if ($useAddType) {
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+
+public class UrlInputResult {
+    public string Url { get; set; }
+    public string Source { get; set; }
+    public int LineNumber { get; set; }
+    public bool IsValid { get; set; }
+    public List<string> Errors { get; set; } = new List<string>();
+    public DateTime RetrievedAt { get; set; }
+}
+
+public class RobotsTxtResult {
+    public List<string> Sitemaps { get; set; } = new List<string>();
+    public double? CrawlDelay { get; set; }
+    public List<string> DisallowPaths { get; set; } = new List<string>();
+    public List<string> AllowPaths { get; set; } = new List<string>();
+}
+'@ -Language CSharp -ReferencedAssemblies 'System.dll', 'System.Core.dll' -ErrorAction Stop
+    }
+    catch {
+        Log-Warning -Message "Add-Type failed in input.ps1, using PSObject fallback" -Category 'Types'
+    }
+}
 
 Export-ModuleMember -Function @(
     'Get-UrlInput',

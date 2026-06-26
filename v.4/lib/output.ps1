@@ -9,162 +9,6 @@
 
 Set-StrictMode -Version Latest
 
-#region Private Helpers - MUST BE DEFINED FIRST (used by public functions)
-
-function Get-Encoding {
-    <#
-    .SYNOPSIS
-        Get a System.Text.Encoding instance by name
-
-    .PARAMETER Name
-        Encoding name (UTF8NoBOM, UTF8, ASCII, UTF7, UTF32, Unicode, BigEndianUnicode, Default, OEM)
-
-    .OUTPUTS
-        System.Text.Encoding
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, Position=0)]
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Name
-    )
-
-    switch ($Name) {
-        'UTF8NoBOM' { return [System.Text.UTF8Encoding]::new($false) }
-        'UTF8'      { return [System.Text.UTF8Encoding]::new($true) }
-        'ASCII'     { return [System.Text.ASCIIEncoding]::new() }
-        'UTF7'      { return [System.Text.UTF7Encoding]::new() }
-        'UTF32'     { return [System.Text.UTF32Encoding]::new() }
-        'Unicode'   { return [System.Text.UnicodeEncoding]::new() }
-        'BigEndianUnicode' { return [System.Text.UnicodeEncoding]::new($true, $true) }
-        'Default'   { return [System.Text.Encoding]::Default }
-        'OEM'       { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
-        default     { return [System.Text.Encoding]::GetEncoding($Name) }
-    }
-}
-
-function Open-OutputStream {
-    <#
-    .SYNOPSIS
-        Open a file stream for writing with optional compression
-
-    .PARAMETER Path
-        Output file path
-
-    .PARAMETER Encoding
-        Encoding name
-
-    .PARAMETER Compress
-        Enable GZip compression
-
-    .PARAMETER Append
-        Append to existing file
-
-    .OUTPUTS
-        System.IO.Stream
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, Position=0)]
-        [string]$Path,
-
-        [Parameter()]
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-
-        [switch]$Compress,
-
-        [switch]$Append
-    )
-
-    $mode = if ($Append) { [IO.FileMode]::Append } else { [IO.FileMode]::Create }
-    $fs = [IO.FileStream]::new($Path, $mode, [IO.FileAccess]::Write)
-
-    if ($Compress) {
-        return [IO.Compression.GZipStream]::new($fs, [IO.Compression.CompressionMode]::Compress)
-    }
-    return $fs
-}
-
-function Write-EncodedFile {
-    <#
-    .SYNOPSIS
-        Write string content to file with encoding and optional compression
-
-    .PARAMETER Path
-        Output file path
-
-    .PARAMETER Content
-        String content to write
-
-    .PARAMETER Encoding
-        Encoding name
-
-    .PARAMETER Compress
-        Enable GZip compression
-
-    .PARAMETER Append
-        Append to existing file
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, Position=0)]
-        [string]$Path,
-
-        [Parameter(Mandatory, Position=1)]
-        [string]$Content,
-
-        [Parameter()]
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-
-        [switch]$Compress,
-
-        [switch]$Append
-    )
-
-    $stream = Open-OutputStream -Path $Path -Encoding $Encoding -Compress:$Compress -Append:$Append
-    try {
-        $encodingObj = Get-Encoding $Encoding
-        $writer = [IO.StreamWriter]::new($stream, $encodingObj)
-        $writer.Write($Content)
-    }
-    finally {
-        if ($writer) { $writer.Dispose() }
-        if ($stream) { $stream.Dispose() }
-    }
-}
-
-function Compress-File {
-    <#
-    .SYNOPSIS
-        Compress a file with GZip and replace original
-
-    .PARAMETER Path
-        File path to compress
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, Position=0)]
-        [string]$Path
-    )
-
-    $source = [IO.File]::OpenRead($Path)
-    $dest = [IO.File]::Create($Path + '.gz')
-    $gzip = [IO.Compression.GZipStream]::new($dest, [IO.Compression.CompressionMode]::Compress)
-    try {
-        $source.CopyTo($gzip)
-    }
-    finally {
-        $gzip.Close()
-        $dest.Close()
-        $source.Close()
-    }
-    Move-Item ($Path + '.gz') $Path -Force
-}
-
-#endregion Helpers
-
 #region Public Functions - Export
 
 function Export-UrlList {
@@ -183,7 +27,7 @@ function Export-UrlList {
         Output file path
 
     .PARAMETER Format
-        Output format: Csv, Json, Jsonl, Xml, Txt, Html, Sitemap, Excel, Markdown (default: Csv)
+        Output format: Csv, Json, Jsonl, Xml, Txt, Html, Sitemap, Excel (default: Csv)
 
     .PARAMETER Properties
         Properties to include (default: all). Use '*' for all, or comma-separated list.
@@ -249,12 +93,11 @@ function Export-UrlList {
     )
 
     begin {
-        $items = [System.Collections.Generic.List[object]]::new()
+        $items = @()
         $exportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
         $dir = Split-Path $exportPath -Parent
         if ($dir -and -not (Test-Path $dir)) {
-            try { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-            catch { throw "Cannot create directory '$dir': $($_.Exception.Message)" }
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
         }
 
         if (Test-Path $exportPath -and -not $Force -and -not $Append) {
@@ -264,7 +107,7 @@ function Export-UrlList {
 
     process {
         foreach ($item in $InputObject) {
-            $items.Add($item)
+            $items += $item
         }
     }
 
@@ -282,92 +125,58 @@ function Export-UrlList {
             return
         }
 
-        if ($PSCmdlet.ShouldProcess($exportPath, "Export $($normalized.Count) items as $Format")) {
-            # Dispatch to format-specific exporter
-            switch ($Format) {
-                'Csv'      { Export-CsvFormat -Items $normalized -Path $exportPath -Delimiter $Delimiter -NoHeader:$NoHeader -Encoding $Encoding -Append:$Append -Compress:$Compress }
-                'Json'     { Export-JsonFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress -Append:$Append }
-                'Jsonl'    { Export-JsonlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress -Append:$Append }
-                'Xml'      { Export-XmlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
-                'Txt'      { Export-TxtFormat -Items $normalized -Path $exportPath -Delimiter $Delimiter -NoHeader:$NoHeader -Encoding $Encoding -Append:$Append -Compress:$Compress }
-                'Html'     { Export-HtmlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
-                'Sitemap'  { Export-SitemapFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
-                'Excel'    { Export-ExcelFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
-                'Markdown' { Export-MarkdownFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
-                default    { throw "Unsupported format: $Format" }
-            }
-
-            Log-Info -Message "Exported {0} items to {1} ({2})" -Args $normalized.Count, $exportPath, $Format -Category 'Export'
+        # Dispatch to format-specific exporter
+        switch ($Format) {
+            'Csv'      { Export-CsvFormat -Items $normalized -Path $exportPath -Delimiter $Delimiter -NoHeader:$NoHeader -Encoding $Encoding -Append:$Append -Compress:$Compress }
+            'Json'     { Export-JsonFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress -Append:$Append }
+            'Jsonl'    { Export-JsonlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress -Append:$Append }
+            'Xml'      { Export-XmlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
+            'Txt'      { Export-TxtFormat -Items $normalized -Path $exportPath -Delimiter $Delimiter -NoHeader:$NoHeader -Encoding $Encoding -Append:$Append -Compress:$Compress }
+            'Html'     { Export-HtmlFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
+            'Sitemap'  { Export-SitemapFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
+            'Excel'    { Export-ExcelFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
+            'Markdown' { Export-MarkdownFormat -Items $normalized -Path $exportPath -Encoding $Encoding -Compress:$Compress }
+            default    { throw "Unsupported format: $Format" }
         }
+
+        Log-Info -Message "Exported {0} items to {1} ({2})" -Args $normalized.Count, $exportPath, $Format -Category 'Export'
     }
 }
 
 function Normalize-ExportItems {
-    <#
-    .SYNOPSIS
-        Normalize input objects to consistent PSObjects for export
+    param($Items, [string[]]$Properties)
 
-    .PARAMETER Items
-        Input objects
+    $includeAll = $Properties -contains '*'
+    $result = @()
 
-    .PARAMETER Properties
-        Properties to include ('*' for all)
+    foreach ($item in $Items) {
+        $obj = [pscustomobject]@{}
 
-    .OUTPUTS
-        List[pscustomobject]
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, ValueFromPipeline)]
-        [object[]]$Items,
+        $propsToExport = if ($includeAll) { $item.PSObject.Properties.Name } else { $Properties }
 
-        [string[]]$Properties = @('*')
-    )
-
-    begin { $result = [System.Collections.Generic.List[pscustomobject]]::new() }
-    process {
-        foreach ($item in $Items) {
-            $obj = [pscustomobject]@{}
-            $includeAll = $Properties -contains '*'
-            $propsToExport = if ($includeAll) { $item.PSObject.Properties.Name } else { $Properties }
-
-            foreach ($prop in $propsToExport) {
-                if ($item.PSObject.Properties[$prop]) {
-                    $val = $item.$prop
-                    # Convert complex types to strings
-                    if ($val -is [DateTime]) { $val = $val.ToString('o') }
-                    elseif ($val -is [Uri]) { $val = $val.AbsoluteUri }
-                    elseif ($val -is [Collections.IDictionary]) { $val = ($val.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ' }
-                    elseif ($val -is [Array] -or $val -is [Collections.IList]) { $val = $val -join '; ' }
-                    $obj | Add-Member -NotePropertyName $prop -NotePropertyValue $val -Force
-                }
+        foreach ($prop in $propsToExport) {
+            if ($item.PSObject.Properties[$prop]) {
+                $val = $item.$prop
+                # Convert complex types to strings
+                if ($val -is [DateTime]) { $val = $val.ToString('o') }
+                elseif ($val -is [Uri]) { $val = $val.AbsoluteUri }
+                elseif ($val -is [Collections.IDictionary]) { $val = ($val.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ' }
+                elseif ($val -is [Array] -or $val -is [Collections.IList]) { $val = $val -join '; ' }
+                $obj | Add-Member -NotePropertyName $prop -NotePropertyValue $val -Force
             }
-            $result.Add($obj)
         }
+        $result.Add($obj)
     }
-    end { return $result }
+
+    return $result
 }
 
 #region Format-Specific Exporters
 
 function Export-CsvFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
+    param([List[psobject]]$Items, [string]$Path, [string]$Delimiter, [switch]$NoHeader, [string]$Encoding, [switch]$Append, [switch]$Compress)
 
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [string]$Delimiter = ',',
-        [switch]$NoHeader,
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Append,
-        [switch]$Compress
-    )
-
-    $encodingObj = Get-Encoding $Encoding
+    $EncodingObj = Get-Encoding $Encoding
     $mode = if ($Compress) {
         $fs = [IO.FileStream]::new($Path + '.gz', [IO.FileMode]::Create, [IO.FileAccess]::Write)
         [IO.Compression.GZipStream]::new($fs, [IO.Compression.CompressionMode]::Compress)
@@ -377,12 +186,10 @@ function Export-CsvFormat {
     }
 
     try {
-        $writer = [IO.StreamWriter]::new($mode, $encodingObj)
+        $writer = [IO.StreamWriter]::new($mode, $EncodingObj)
         $writer.AutoFlush = $true
 
-        # Write header if needed
-        $writeHeader = -not $NoHeader -and (-not $Append -or -not (Test-Path $Path) -or (Get-Item $Path).Length -eq 0)
-        if ($writeHeader -and $Items.Count -gt 0) {
+        if (-not $NoHeader -and (-not $Append -or (Test-Path $Path -and (Get-Item $Path).Length -eq 0))) {
             $headers = $Items[0].PSObject.Properties.Name -join $Delimiter
             $writer.WriteLine($headers)
         }
@@ -391,7 +198,7 @@ function Export-CsvFormat {
             $values = $item.PSObject.Properties.Value | ForEach-Object {
                 $str = if ($_ -eq $null) { '' } else { $_.ToString() }
                 # Escape for CSV
-                if ($str -match '["\r\n]') {
+                if ($str -match '[\",\r\n]') {
                     '"' + $str.Replace('"', '""') + '"'
                 } else { $str }
             }
@@ -405,43 +212,18 @@ function Export-CsvFormat {
 }
 
 function Export-JsonFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress,
-        [switch]$Append
-    )
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress, [switch]$Append)
 
     $json = $Items | ConvertTo-Json -Depth 5 -Compress
     Write-EncodedFile -Path $Path -Content $json -Encoding $Encoding -Compress:$Compress -Append:$Append
 }
 
 function Export-JsonlFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress,
-        [switch]$Append
-    )
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress, [switch]$Append)
 
     $stream = Open-OutputStream -Path $Path -Encoding $Encoding -Compress:$Compress -Append:$Append
     try {
-        $encodingObj = Get-Encoding $Encoding
-        $writer = [IO.StreamWriter]::new($stream, $encodingObj)
+        $writer = [IO.StreamWriter]::new($stream, Get-Encoding $Encoding)
         $writer.AutoFlush = $true
         foreach ($item in $Items) {
             $json = $item | ConvertTo-Json -Depth 5 -Compress
@@ -455,92 +237,37 @@ function Export-JsonlFormat {
 }
 
 function Export-XmlFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress)
 
-        [Parameter(Mandatory)]
-        [string]$Path,
+    $xml = [Xml]::new()
+    $root = $xml.CreateElement('UrlList')
+    $xml.AppendChild($root) | Out-Null
 
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress
-    )
-
-    try {
-        $xml = [Xml]::new()
-        $root = $xml.CreateElement('UrlList')
-        $xml.AppendChild($root) | Out-Null
-
-        foreach ($item in $Items) {
-            $urlEl = $xml.CreateElement('Url')
-            foreach ($prop in $item.PSObject.Properties) {
-                $child = $xml.CreateElement($prop.Name)
-                $val = if ($prop.Value) { $prop.Value.ToString() } else { '' }
-                $child.InnerText = $val
-                $urlEl.AppendChild($child) | Out-Null
-            }
-            $root.AppendChild($urlEl) | Out-Null
+    foreach ($item in $Items) {
+        $urlEl = $xml.CreateElement('Url')
+        foreach ($prop in $item.PSObject.Properties) {
+            $child = $xml.CreateElement($prop.Name)
+            $val = if ($prop.Value) { $prop.Value.ToString() } else { '' }
+            $child.InnerText = $val
+            $urlEl.AppendChild($child) | Out-Null
         }
-
-        $settings = [Xml.XmlWriterSettings]::new()
-        $settings.Indent = $true
-        $settings.Encoding = Get-Encoding $Encoding
-        $settings.OmitXmlDeclaration = $false
-
-        $writer = [Xml.XmlWriter]::Create($Path, $settings)
-        try {
-            $xml.Save($writer)
-        }
-        finally {
-            $writer.Close()
-        }
-
-        if ($Compress) { Compress-File $Path }
+        $root.AppendChild($urlEl) | Out-Null
     }
-    catch {
-        Log-Error -Message "XML export failed: {0}" -Args $_.Exception.Message -Exception $_ -Category 'Export'
-        throw
+
+    $xml.Save($Path)
+    if ($Compress) {
+        Compress-File $Path
     }
 }
 
 function Export-TxtFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
+    param([List[psobject]]$Items, [string]$Path, [string]$Delimiter, [switch]$NoHeader, [string]$Encoding, [switch]$Append, [switch]$Compress)
 
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [string]$Delimiter = ',',
-        [switch]$NoHeader,
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Append,
-        [switch]$Compress
-    )
-
-    # TXT format is essentially CSV without quoting
     Export-CsvFormat @PSBoundParameters
 }
 
 function Export-HtmlFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress
-    )
-
-    $headers = $Items[0].PSObject.Properties.Name
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress)
 
     $html = @"
 <!DOCTYPE html>
@@ -569,6 +296,7 @@ function Export-HtmlFormat {
         <thead><tr>
 "@
 
+    $headers = $Items[0].PSObject.Properties.Name
     $html += ($headers | ForEach-Object { "            <th>$($_)</th>" }) -join "`n"
     $html += @"
         </tr></thead>
@@ -600,132 +328,151 @@ function Export-HtmlFormat {
 }
 
 function Export-SitemapFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress)
 
-        [Parameter(Mandatory)]
-        [string]$Path,
+    $xml = [Xml]::new()
+    $xml.AppendChild($xml.CreateXmlDeclaration('1.0', 'UTF-8', $null)) | Out-Null
 
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress
-    )
+    $urlset = $xml.CreateElement('urlset')
+    $urlset.SetAttribute('xmlns', 'http://www.sitemaps.org/schemas/sitemap/0.9')
+    $urlset.SetAttribute('xmlns:xhtml', 'http://www.w3.org/1999/xhtml')
+    $xml.AppendChild($urlset) | Out-Null
 
-    try {
-        $xml = [Xml]::new()
-        $xml.AppendChild($xml.CreateXmlDeclaration('1.0', 'UTF-8', $null)) | Out-Null
+    foreach ($item in $Items) {
+        $url = if ($item.Url) { $item.Url } elseif ($item.url) { $item.url } else { '' }
+        if (-not $url) { continue }
 
-        $urlset = $xml.CreateElement('urlset')
-        $urlset.SetAttribute('xmlns', 'http://www.sitemaps.org/schemas/sitemap/0.9')
-        $urlset.SetAttribute('xmlns:xhtml', 'http://www.w3.org/1999/xhtml')
-        $xml.AppendChild($urlset) | Out-Null
+        $urlEl = $xml.CreateElement('url')
+        $loc = $xml.CreateElement('loc')
+        $loc.InnerText = $url
+        $urlEl.AppendChild($loc) | Out-Null
 
-        foreach ($item in $Items) {
-            $url = if ($item.Url) { $item.Url } elseif ($item.url) { $item.url } else { '' }
-            if (-not $url) { continue }
-
-            $urlEl = $xml.CreateElement('url')
-            $loc = $xml.CreateElement('loc')
-            $loc.InnerText = $url
-            $urlEl.AppendChild($loc) | Out-Null
-
-            # Optional fields
-            $lastMod = if ($item.LastMod) { $item.LastMod } elseif ($item.LastModified) { $item.LastModified } else { $null }
-            if ($lastMod) {
-                $lm = $xml.CreateElement('lastmod')
-                $lm.InnerText = $lastMod.ToString('yyyy-MM-dd')
-                $urlEl.AppendChild($lm) | Out-Null
-            }
-            $changeFreq = if ($item.ChangeFreq) { $item.ChangeFreq } elseif ($item.ChangeFrequency) { $item.ChangeFrequency } else { $null }
-            if ($changeFreq) {
-                $cf = $xml.CreateElement('changefreq')
-                $cf.InnerText = $changeFreq
-                $urlEl.AppendChild($cf) | Out-Null
-            }
-            if ($item.Priority) {
-                $pr = $xml.CreateElement('priority')
-                $pr.InnerText = [string]$item.Priority
-                $urlEl.AppendChild($pr) | Out-Null
-            }
-
-            $urlset.AppendChild($urlEl) | Out-Null
+        # Optional fields
+        $lastMod = if ($item.LastMod) { $item.LastMod } elseif ($item.LastModified) { $item.LastModified } else { $null }
+        if ($lastMod) {
+            $lm = $xml.CreateElement('lastmod')
+            $lm.InnerText = $lastMod.ToString('yyyy-MM-dd')
+            $urlEl.AppendChild($lm) | Out-Null
+        }
+        $changeFreq = if ($item.ChangeFreq) { $item.ChangeFreq } elseif ($item.ChangeFrequency) { $item.ChangeFrequency } else { $null }
+        if ($changeFreq) {
+            $cf = $xml.CreateElement('changefreq')
+            $cf.InnerText = $changeFreq
+            $urlEl.AppendChild($cf) | Out-Null
+        }
+        if ($item.Priority) {
+            $pr = $xml.CreateElement('priority')
+            $pr.InnerText = [string]$item.Priority
+            $urlEl.AppendChild($pr) | Out-Null
         }
 
-        $settings = [Xml.XmlWriterSettings]::new()
-        $settings.Indent = $true
-        $settings.Encoding = Get-Encoding $Encoding
-        $settings.OmitXmlDeclaration = $false
-
-        $writer = [Xml.XmlWriter]::Create($Path, $settings)
-        try {
-            $xml.Save($writer)
-        }
-        finally {
-            $writer.Close()
-        }
-
-        if ($Compress) { Compress-File $Path }
+        $urlset.AppendChild($urlEl) | Out-Null
     }
-    catch {
-        Log-Error -Message "Sitemap export failed: {0}" -Args $_.Exception.Message -Exception $_ -Category 'Export'
-        throw
+
+    $settings = [Xml.XmlWriterSettings]::new()
+    $settings.Indent = $true
+    $settings.Encoding = Get-Encoding $Encoding
+    $settings.OmitXmlDeclaration = $false
+
+    $writer = [Xml.XmlWriter]::Create($Path, $settings)
+    $xml.Save($writer)
+    $writer.Close()
+
+    if ($Compress) {
+        Compress-File $Path
     }
 }
 
 function Export-ExcelFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress
-    )
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress)
 
     # Excel can open CSV directly. Export as CSV with .xlsx extension
     $csvPath = [IO.Path]::ChangeExtension($Path, '.csv')
     Export-CsvFormat -Items $Items -Path $csvPath -Delimiter ',' -Encoding $Encoding -NoHeader:$false
     Move-Item $csvPath $Path -Force
 
-    if ($Compress) { Compress-File $Path }
+    if ($Compress) {
+        Compress-File $Path
+    }
 }
 
 function Export-MarkdownFormat {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [List[psobject]]$Items,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('ASCII','UTF7','UTF8','UTF8NoBOM','UTF32','Unicode','BigEndianUnicode','Default','OEM')]
-        [string]$Encoding = 'UTF8NoBOM',
-        [switch]$Compress
-    )
+    param([List[psobject]]$Items, [string]$Path, [string]$Encoding, [switch]$Compress)
 
     $headers = $Items[0].PSObject.Properties.Name
-    $md = "| $($headers -join ' | ') |`n"
-    $md += "| $($headers | ForEach-Object { '---' }) -join ' | ') |`n"
+    $md = "| $($headers -join ' | ') |\n"
+    $md += "| $($headers | ForEach-Object { '---' }) -join ' | ') |\n"
 
     foreach ($item in $Items) {
         $row = $item.PSObject.Properties.Value | ForEach-Object {
             $str = if ($_ -eq $null) { '' } else { $_.ToString().Replace('|', '\|') }
             $str
         }
-        $md += "| $($row -join ' | ') |`n"
+        $md += "| $($row -join ' | ') |\n"
     }
 
     Write-EncodedFile -Path $Path -Content $md -Encoding $Encoding -Compress:$Compress
 }
 
-#endregion Format-Specific Exporters
+#endregion
+
+#region Helpers
+
+function Get-Encoding {
+    param([string]$Name)
+    switch ($Name) {
+        'UTF8NoBOM' { return [System.Text.UTF8Encoding]::new($false) }
+        'UTF8'      { return [System.Text.UTF8Encoding]::new($true) }
+        'ASCII'     { return [System.Text.ASCIIEncoding]::new() }
+        'UTF7'      { return [System.Text.UTF7Encoding]::new() }
+        'UTF32'     { return [System.Text.UTF32Encoding]::new() }
+        'Unicode'   { return [System.Text.UnicodeEncoding]::new() }
+        'BigEndianUnicode' { return [System.Text.UnicodeEncoding]::new($true, $true) }
+        'Default'   { return [System.Text.Encoding]::Default }
+        'OEM'       { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+        default     { return [System.Text.Encoding]::GetEncoding($Name) }
+    }
+}
+
+function Write-EncodedFile {
+    param([string]$Path, [string]$Content, [string]$Encoding, [switch]$Compress, [switch]$Append)
+
+    $stream = Open-OutputStream -Path $Path -Encoding $Encoding -Compress:$Compress -Append:$Append
+    try {
+        $writer = [IO.StreamWriter]::new($stream, Get-Encoding $Encoding)
+        $writer.Write($Content)
+    }
+    finally {
+        if ($writer) { $writer.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Open-OutputStream {
+    param([string]$Path, [string]$Encoding, [switch]$Compress, [switch]$Append)
+
+    if ($Append) { $mode = [IO.FileMode]::Append } else { $mode = [IO.FileMode]::Create }
+    $fs = [IO.FileStream]::new($Path, $mode, [IO.FileAccess]::Write)
+
+    if ($Compress) {
+        return [IO.Compression.GZipStream]::new($fs, [IO.Compression.CompressionMode]::Compress)
+    }
+    return $fs
+}
+
+function Compress-File {
+    param([string]$Path)
+    $source = [IO.File]::OpenRead($Path)
+    $dest = [IO.File]::Create($Path + '.gz')
+    $gzip = [IO.Compression.GZipStream]::new($dest, [IO.Compression.CompressionMode]::Compress)
+    $source.CopyTo($gzip)
+    $gzip.Close()
+    $dest.Close()
+    $source.Close()
+    Move-Item ($Path + '.gz') $Path -Force
+}
+
+#endregion
 
 #region Console Output Formatting
 
@@ -741,7 +488,7 @@ function Format-UrlTable {
         Properties to display
 
     .PARAMETER MaxWidth
-        Maximum column width (default: 120)
+        Maximum column width (default: auto)
 
     .EXAMPLE
         $urls | Format-UrlTable -Properties Url,Depth,StatusCode
@@ -756,8 +503,10 @@ function Format-UrlTable {
         [int]$MaxWidth = 120
     )
 
-    begin { $items = [System.Collections.Generic.List[object]]::new() }
-    process { $items.Add($InputObject) }
+    begin {
+        $items = @()
+    }
+    process { $items += $InputObject }
     end {
         if (-not $items) { return }
 
@@ -815,8 +564,8 @@ function Format-UrlTree {
         [int]$MaxDepth = 5
     )
 
-    begin { $items = [System.Collections.Generic.List[object]]::new() }
-    process { $items.Add($InputObject) }
+    begin { $items = @() }
+    process { $items += $InputObject }
     end {
         if (-not $items) { return }
 
@@ -860,7 +609,7 @@ function Write-UrlTree {
     }
 }
 
-#endregion Console Output Formatting
+#endregion
 
 Export-ModuleMember -Function @(
     'Export-UrlList',

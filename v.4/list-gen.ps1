@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    list-gen - Professional URL List Generator CLI
+    list-gen.exe - Professional URL List Generator CLI
 
 .DESCRIPTION
     Command-line interface for the list-gen PowerShell module. Generates, crawls,
     validates, and exports URL lists with enterprise-grade features.
 
 .NOTES
-    Version:        4.1.0
+    Version:        4.0.0
     Author:         myTech.Today
     Repository:     https://github.com/mytech-today-now/URL-list-generator
     License:        MIT
@@ -82,17 +82,8 @@
 .PARAMETER Quiet
     Suppress non-error output
 
-.PARAMETER RetryCount
-    Number of retry attempts for failed requests (default: 3)
-
-.PARAMETER RetryDelayMs
-    Base delay between retries in milliseconds (default: 1000)
-
-.PARAMETER RespectRobots
-    Respect robots.txt rules during crawling (default: $true)
-
-.PARAMETER FollowRedirects
-    Follow HTTP redirects (default: $true)
+.PARAMETER WhatIf
+    Show what would be done without executing
 
 .PARAMETER Version
     Show version information and exit
@@ -114,8 +105,8 @@
     .\list-gen.ps1 -Source './input-urls.txt' -CheckReachability -Format Jsonl -OutputPath './validated.jsonl'
 
 .EXAMPLE
-    # Crawl with custom headers, rate limiting, and retries
-    .\list-gen.ps1 -Source 'https://api.example.com' -Crawl -MaxConcurrent 3 -RateLimitMs 500 -RetryCount 5 -Headers '{"Authorization":"Bearer token"}' -OutputPath './api-urls.json'
+    # Crawl with custom headers and rate limiting
+    .\list-gen.ps1 -Source 'https://api.example.com' -Crawl -MaxConcurrent 3 -RateLimitMs 500 -Headers '{"Authorization":"Bearer token"}' -OutputPath './api-urls.json'
 
 .EXAMPLE
     # Pipeline usage
@@ -151,25 +142,6 @@ param(
     [Parameter(ParameterSetName='Crawl')]
     [ValidateRange(0, 10000)]
     [int]$RateLimitMs = 100,
-
-    [Parameter(ParameterSetName='Crawl')]
-    [switch]$RespectRobots = $true,
-
-    [Parameter(ParameterSetName='Crawl')]
-    [switch]$FollowRedirects = $true,
-
-    # Retry settings
-    [Parameter(ParameterSetName='Default')]
-    [Parameter(ParameterSetName='Crawl')]
-    [Parameter(ParameterSetName='Validate')]
-    [ValidateRange(0, 10)]
-    [int]$RetryCount = 3,
-
-    [Parameter(ParameterSetName='Default')]
-    [Parameter(ParameterSetName='Crawl')]
-    [Parameter(ParameterSetName='Validate')]
-    [ValidateRange(0, 60000)]
-    [int]$RetryDelayMs = 1000,
 
     # Filtering
     [Parameter(ParameterSetName='Default')]
@@ -226,7 +198,7 @@ param(
     [Parameter(ParameterSetName='Default')]
     [Parameter(ParameterSetName='Crawl')]
     [Parameter(ParameterSetName='Validate')]
-    [string]$UserAgent = 'list-gen/4.1.0 (+https://github.com/mytech-today-now/URL-list-generator)',
+    [string]$UserAgent = 'list-gen/4.0.0',
 
     [Parameter(ParameterSetName='Default')]
     [Parameter(ParameterSetName='Crawl')]
@@ -266,7 +238,7 @@ param(
 
 # Show version and exit
 if ($Version) {
-    Write-Host "list-gen v4.1.0"
+    Write-Host "list-gen v4.0.0"
     Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
     Write-Host "Edition: $($PSVersionTable.PSEdition)"
     Write-Host "Repository: https://github.com/mytech-today-now/URL-list-generator"
@@ -295,7 +267,7 @@ if ($LogFile) {
 }
 Set-LogConfig @logParams
 
-Log-Info -Message "Starting list-gen v4.1.0 - Source: $Source, Crawl: $Crawl, Format: $Format" -Category 'Main'
+Log-Info -Message "Starting list-gen v4.0.0 - Source: $Source, Crawl: $Crawl, Format: $Format" -Category 'Main'
 
 # Parse headers
 $parsedHeaders = @{}
@@ -364,8 +336,6 @@ try {
             -MaxConcurrent $MaxConcurrent -RateLimitMs $RateLimitMs -Pattern $Pattern `
             -RegexPattern $RegexPattern -ExcludePattern $ExcludePattern -AllowedDomains $allowedDomainsList `
             -TimeoutSec $TimeoutSec -UserAgent $UserAgent -Headers $parsedHeaders `
-            -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs `
-            -RespectRobots $RespectRobots -FollowRedirects $FollowRedirects `
             -OnProgress $progressAction -OnUrlDiscovered $discoveredAction
 
         # Apply post-crawl filtering if needed
@@ -404,7 +374,7 @@ try {
         # If source is a single URL and not a file/sitemap, also extract from the page
         if ($Source -match '^https?://' -and $Source -notlike 'sitemap:*' -and $Source -notlike 'robots:*') {
             Log-Verbose -Message "Fetching page content for link extraction: {0}" -Args $Source -Category 'Extract'
-            $html = Invoke-WebRequestSafe -Url $Source -TimeoutSec $TimeoutSec -RetryCount $RetryCount -RetryDelayMs $RetryDelayMs
+            $html = Invoke-WebRequestSafe -Url $Source -TimeoutSec $TimeoutSec
             if ($html) {
                 $extracted = Extract-UrlsFromHtml -Html $html -BaseUrl $Source -ResolveRelative
                 $extractedUrls = $extracted | Select-Object -ExpandProperty Url
@@ -469,12 +439,7 @@ catch {
 finally {
     # Cleanup HttpClient if used
     if ($script:HttpClient) {
-        try { $script:HttpClient.Dispose() } catch { }
+        $script:HttpClient.Dispose()
         $script:HttpClient = $null
-    }
-    # Close log file stream
-    if ($script:LogConfig.EnableFile -and $script:FileStream) {
-        try { $script:FileStream.Close(); $script:FileStream.Dispose() } catch { }
-        $script:FileStream = $null
     }
 }
